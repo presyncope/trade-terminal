@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import nautilus_trader; print\\(nautilus_trader.__file__\\)\")"
+    ]
+  }
+}

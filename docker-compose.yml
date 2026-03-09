@@ -1,0 +1,104 @@
+version: "3.9"
+
+services:
+  # ─── Storage Layer ───────────────────────────────────────
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: irh-timescaledb
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: trader
+      POSTGRES_PASSWORD: trader_pass
+      POSTGRES_DB: trade_hub
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ./infra/db/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trader -d trade_hub"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: irh-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ─── Backend Services ────────────────────────────────────
+  datastream:
+    build:
+      context: .
+      dockerfile: services/datastream/Dockerfile
+    container_name: irh-datastream
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  trading:
+    build:
+      context: .
+      dockerfile: services/trading/Dockerfile
+    container_name: irh-trading
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  data-worker:
+    build:
+      context: .
+      dockerfile: services/data-worker/Dockerfile
+    container_name: irh-data-worker
+    env_file: .env
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web-api:
+    build:
+      context: .
+      dockerfile: services/web-api/Dockerfile
+    container_name: irh-web-api
+    ports:
+      - "8000:8000"
+    env_file: .env
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ─── Frontend ────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: irh-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - web-api
+    environment:
+      - VITE_WS_URL=ws://localhost:8000/ws
+      - VITE_API_URL=http://localhost:8000
+
+volumes:
+  timescale_data:
+  redis_data:
