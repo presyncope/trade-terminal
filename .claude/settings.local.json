@@ -1,7 +1,37 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3 -c \"import nautilus_trader; print\\(nautilus_trader.__file__\\)\")"
+      "Bash(python3 -c \"import nautilus_trader; print\\(nautilus_trader.__file__\\)\")",
+      "Bash(docker compose logs datastream --tail=30)",
+      "Bash(curl -s \"http://localhost:8000/api/klines?exchange=binance_spot&symbol=BTCUSDT&interval=1m&limit=5\")",
+      "Bash(docker compose restart datastream data-worker)",
+      "Bash(docker compose logs datastream --tail=15)",
+      "Bash(docker compose up -d datastream data-worker)",
+      "Bash(npm run build)",
+      "Bash(npm install)",
+      "Bash(docker compose logs data-worker --tail=20)",
+      "Bash(curl -s \"http://localhost:8000/api/klines?exchange=binance_spot&symbol=BTCUSDT&interval=1m&limit=3\")",
+      "Bash(docker compose up -d --build data-worker)",
+      "Bash(curl -s \"http://localhost:8000/api/klines?exchange=binance_spot&symbol=BTCUSDT&interval=1m&limit=1\")",
+      "Bash(docker run --rm trade-terminal-data-worker python -c \":*)",
+      "Bash(docker compose logs data-worker --tail=10)",
+      "Bash(docker compose exec timescaledb psql -U trader -d trade_hub -c \":*)",
+      "Bash(docker compose logs datastream --tail=20)",
+      "Bash(docker compose -f /home/nuk/repos/trade-terminal/docker-compose.yml exec timescaledb psql -U trader -d trade_hub -c \"TRUNCATE TABLE klines CASCADE;\")",
+      "Bash(docker compose -f /home/nuk/repos/trade-terminal/docker-compose.yml exec timescaledb psql -U trader -d trade_hub -c \":*)",
+      "Bash(docker compose up --build web-api data-worker frontend -d)",
+      "Bash(docker compose -f /home/nuk/repos/trade-terminal/docker-compose.yml logs web-api --tail=5)",
+      "Bash(docker compose -f /home/nuk/repos/trade-terminal/docker-compose.yml logs data-worker --tail=5)",
+      "Bash(docker compose -f /home/nuk/repos/trade-terminal/docker-compose.yml logs data-worker --tail=15)",
+      "Bash(docker compose -f /home/nuk/repos/trade-terminal/docker-compose.yml logs web-api --tail=20)",
+      "Bash(docker compose -f /home/nuk/repos/trade-terminal/docker-compose.yml logs data-worker)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(''rows:'', len\\(d[''data'']\\), ''backfill_triggered:'', d[''backfill_triggered'']\\)\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(r\\) for r in d[''data'']]\")",
+      "Bash(docker compose -f /home/nuk/repos/trade-terminal/docker-compose.yml exec timescaledb psql -U trader -d trade_hub -c \"SELECT COUNT\\(*\\) FROM klines;\")",
+      "Bash(curl -s \"http://localhost:8000/api/klines?exchange=binance_spot&symbol=BTCUSDT&interval=1h&limit=5\")",
+      "Bash(python3 -c \"import json,sys,datetime; d=json.load\\(sys.stdin\\); print\\(''rows:'', len\\(d[''data'']\\), ''backfill_triggered:'', d[''backfill_triggered'']\\); [print\\(datetime.datetime.fromtimestamp\\(r[''time'']\\).isoformat\\(\\), r[''open''], r[''close'']\\) for r in d[''data'']]\")",
+      "Bash(docker compose -f /home/nuk/repos/trade-terminal/docker-compose.yml logs data-worker --tail=10)",
+      "Bash(python3 -c \"import json,sys,datetime; d=json.load\\(sys.stdin\\); print\\(''rows:'', len\\(d[''data'']\\)\\); [print\\(datetime.datetime.fromtimestamp\\(r[''time'']\\).isoformat\\(\\), r[''open''], ''→'', r[''close'']\\) for r in d[''data'']]\")"
     ]
   }
 }

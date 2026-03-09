@@ -6,6 +6,11 @@ import type { Kline, ExchangeId } from "../types";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
+export interface KlinesResponse {
+  data: Kline[];
+  backfill_triggered: boolean;
+}
+
 export async function fetchKlines(params: {
   exchange: ExchangeId;
   symbol: string;
@@ -13,7 +18,7 @@ export async function fetchKlines(params: {
   start?: string;
   end?: string;
   limit?: number;
-}): Promise<Kline[]> {
+}): Promise<KlinesResponse> {
   const searchParams = new URLSearchParams();
   searchParams.set("exchange", params.exchange);
   searchParams.set("symbol", params.symbol);

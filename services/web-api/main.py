@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 import asyncpg
 import redis.asyncio as aioredis
@@ -57,14 +57,26 @@ app.add_middleware(
 )
 
 
-# ─── Timeframe → table/view mapping ──────────────────────
-INTERVAL_TABLE = {
-    "1m":  "klines",
-    "5m":  "klines_5m",
-    "15m": "klines_15m",
-    "1h":  "klines_1h",
-    "4h":  "klines_4h",
-    "1d":  "klines_1d",
+# ─── Timeframe config ─────────────────────────────────────
+# Non-1m intervals use inline time_bucket() on the raw klines table rather
+# than querying the continuous aggregate views, because the views start empty
+# (WITH NO DATA) and only populate after their scheduled refresh runs.
+INTERVAL_BUCKET = {
+    "1m":  None,           # direct row query — no bucketing
+    "5m":  "5 minutes",
+    "15m": "15 minutes",
+    "1h":  "1 hour",
+    "4h":  "4 hours",
+    "1d":  "1 day",
+}
+
+INTERVAL_SECONDS = {
+    "1m":  60,
+    "5m":  300,
+    "15m": 900,
+    "1h":  3_600,
+    "4h":  14_400,
+    "1d":  86_400,
 }
 
 
@@ -84,45 +96,102 @@ async def get_klines(
     """
     Fetch historical kline data from TimescaleDB.
 
-    Returns array of [timestamp_ms, open, high, low, close, volume].
-    Compatible with TradingView Lightweight Charts data format.
-    """
-    table = INTERVAL_TABLE.get(interval, "klines")
+    1m  — queries the raw klines hypertable directly.
+    5m+ — queries klines_native (natively fetched at the target interval).
+          Falls back to inline time_bucket() on klines if native data is absent
+          (covers the initial 3-day window before the first native backfill runs).
 
-    query = f"""
-        SELECT ts, open, high, low, close, volume
-        FROM {table}
-        WHERE exchange = $1 AND symbol = $2
+    Always returns the MOST RECENT `limit` candles, ordered ascending.
+    Triggers a backfill (at the same interval) when data is missing.
     """
+    interval_secs = INTERVAL_SECONDS.get(interval, 60)
     params: list = [exchange, symbol]
     idx = 3
 
+    where_base = "exchange = $1 AND symbol = $2"
     if start:
-        query += f" AND ts >= ${idx}"
+        where_base += f" AND ts >= ${idx}"
         params.append(start)
         idx += 1
     if end:
-        query += f" AND ts <= ${idx}"
+        where_base += f" AND ts <= ${idx}"
         params.append(end)
         idx += 1
 
-    query += f" ORDER BY ts ASC LIMIT ${idx}"
+    if interval == "1m":
+        # 1m: direct query on raw hypertable
+        inner = f"""
+            SELECT ts, open, high, low, close, volume
+            FROM klines
+            WHERE {where_base}
+            ORDER BY ts DESC
+            LIMIT ${idx}
+        """
+    else:
+        # Non-1m: prefer natively stored candles in klines_native …
+        native_where = where_base + f" AND interval = '{interval}'"
+        inner = f"""
+            SELECT ts, open, high, low, close, volume
+            FROM klines_native
+            WHERE {native_where}
+            ORDER BY ts DESC
+            LIMIT ${idx}
+        """
+
     params.append(limit)
+    query = f"SELECT * FROM ({inner}) sub ORDER BY ts ASC"
 
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(query, *params)
 
-    return [
+    # ── Cache-miss detection: trigger interval-native backfill if data is sparse ──
+    backfill_triggered = False
+    now = datetime.now(timezone.utc)
+
+    async def _publish_backfill(bf_start: datetime, bf_end: datetime):
+        await redis_client.publish("cmd:backfill", json.dumps({
+            "exchange": exchange,
+            "symbol":   symbol,
+            "interval": interval,
+            "start":    bf_start.isoformat(),
+            "end":      bf_end.isoformat(),
+        }))
+        logger.info(f"Triggered {interval} backfill for {exchange}:{symbol} [{bf_start} → {bf_end}]")
+
+    if end:
+        # Historical scroll: if fewer than 50% of expected candles exist, backfill that window
+        if len(rows) < limit * 0.5:
+            bf_start = end - timedelta(seconds=limit * interval_secs)
+            await _publish_backfill(bf_start, end)
+            backfill_triggered = True
+    else:
+        # Initial load: backfill if empty or newest candle is stale (> 1h old)
+        newest_age_h = None
+        if rows:
+            newest_ts = rows[-1]["ts"]
+            if newest_ts.tzinfo is None:
+                newest_ts = newest_ts.replace(tzinfo=timezone.utc)
+            newest_age_h = (now - newest_ts).total_seconds() / 3600
+
+        if not rows or newest_age_h > 1.0:
+            bf_end   = now
+            # Cover enough history to fill the chart (limit candles worth)
+            bf_start = now - timedelta(seconds=limit * interval_secs)
+            await _publish_backfill(bf_start, bf_end)
+            backfill_triggered = True
+
+    data = [
         {
             "time": int(row["ts"].timestamp()),
-            "open": row["open"],
-            "high": row["high"],
-            "low": row["low"],
-            "close": row["close"],
-            "volume": row["volume"],
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "volume": float(row["volume"]),
         }
         for row in rows
     ]
+    return {"data": data, "backfill_triggered": backfill_triggered}
 
 
 @app.get("/api/fills")
@@ -271,8 +340,8 @@ async def _redis_relay(ws: WebSocket):
     rds = create_redis()
     pubsub = rds.pubsub()
 
-    # Subscribe to all kline and fill channels via pattern
-    await pubsub.psubscribe("kline:*", "fill:*")
+    # Subscribe to all kline, fill, and backfill completion channels via pattern
+    await pubsub.psubscribe("kline:*", "fill:*", "backfill:done:*")
 
     try:
         async for msg in pubsub.listen():

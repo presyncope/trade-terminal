@@ -35,26 +35,46 @@ async def bulk_insert_klines(
     symbol: str,
     rows: list[tuple],
 ) -> int:
-    """
-    Insert kline rows into TimescaleDB using COPY for maximum throughput.
-
+    """Insert 1m kline rows into the klines hypertable.
     Each row: (ts, open, high, low, close, volume, turnover, trade_count)
     """
     if not rows:
         return 0
 
     async with pool.acquire() as conn:
-        # Use ON CONFLICT to handle duplicates gracefully
-        inserted = await conn.executemany(
+        await conn.executemany(
             """
             INSERT INTO klines (ts, exchange, symbol, open, high, low, close, volume, turnover, trade_count)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (exchange, symbol, ts) DO NOTHING
             """,
-            [
-                (row[0], exchange, symbol, *row[1:])
-                for row in rows
-            ],
+            [(row[0], exchange, symbol, *row[1:]) for row in rows],
+        )
+        return len(rows)
+
+
+async def bulk_insert_klines_native(
+    pool: asyncpg.Pool,
+    exchange: str,
+    symbol: str,
+    interval: str,
+    rows: list[tuple],
+) -> int:
+    """Insert higher-timeframe klines (5m/15m/1h/4h/1d) into klines_native.
+    Each row: (ts, open, high, low, close, volume, ...)  — only first 6 fields used.
+    """
+    if not rows:
+        return 0
+
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            """
+            INSERT INTO klines_native (ts, exchange, symbol, interval, open, high, low, close, volume)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (exchange, symbol, interval, ts) DO NOTHING
+            """,
+            [(row[0], exchange, symbol, interval, row[1], row[2], row[3], row[4], row[5])
+             for row in rows],
         )
         return len(rows)
 
@@ -66,26 +86,45 @@ async def backfill(
     symbol: str,
     start: datetime,
     end: datetime,
+    interval: str = "1m",
     batch_size: int = 1000,
+    redis=None,
 ):
-    """Fetch historical klines and insert in batches."""
-    fetcher = _get_fetcher(exchange)
+    """Fetch historical klines and insert in batches.
 
-    logger.info(f"Backfilling {exchange}:{symbol} from {start} to {end}")
+    interval="1m"  → stored in klines (base hypertable, used for time_bucket aggregation)
+    interval=other → stored in klines_native (pre-aggregated at native resolution)
+    """
+    logger.info(f"Backfilling {exchange}:{symbol} [{interval}] from {start} to {end}")
 
     total = 0
-    async for batch in fetcher.fetch_klines(
-        symbol=symbol,
-        interval="1m",
-        start=start,
-        end=end,
-        batch_size=batch_size,
-    ):
-        count = await bulk_insert_klines(pool, exchange, symbol, batch)
-        total += count
-        logger.info(f"  Inserted {count} rows (total: {total})")
+    async with _get_fetcher(exchange) as fetcher:
+        async for batch in fetcher.fetch_klines(
+            symbol=symbol,
+            interval=interval,
+            start=start,
+            end=end,
+            batch_size=batch_size,
+        ):
+            if interval == "1m":
+                count = await bulk_insert_klines(pool, exchange, symbol, batch)
+            else:
+                count = await bulk_insert_klines_native(pool, exchange, symbol, interval, batch)
+            total += count
+            logger.info(f"  Inserted {count} rows (total: {total})")
 
     logger.info(f"Backfill complete: {total} rows for {exchange}:{symbol}")
+
+    if redis:
+        channel = f"backfill:done:{exchange}:{symbol}"
+        await redis.publish(channel, json.dumps({
+            "exchange": exchange,
+            "symbol": symbol,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+        }))
+        logger.info(f"Published completion to {channel}")
+
     return total
 
 
@@ -119,13 +158,16 @@ async def listen_commands(pool: asyncpg.Pool, redis: aioredis.Redis):
         try:
             payload = json.loads(msg["data"])
             # Expected: {"exchange": "binance_spot", "symbol": "BTCUSDT",
+            #            "interval": "1h",  (optional, defaults to "1m")
             #            "start": "2024-01-01T00:00:00Z", "end": "2024-06-01T00:00:00Z"}
             await backfill(
                 pool=pool,
                 exchange=payload["exchange"],
                 symbol=payload["symbol"],
+                interval=payload.get("interval", "1m"),
                 start=datetime.fromisoformat(payload["start"]),
                 end=datetime.fromisoformat(payload["end"]),
+                redis=redis,
             )
         except Exception:
             logger.exception("Error processing backfill command")
@@ -143,7 +185,7 @@ async def main():
             symbol = sys.argv[3]
             start = datetime.fromisoformat(sys.argv[4]).replace(tzinfo=timezone.utc)
             end = datetime.fromisoformat(sys.argv[5]).replace(tzinfo=timezone.utc)
-            await backfill(pool, exchange, symbol, start, end)
+            await backfill(pool, exchange, symbol, start, end, redis=rds)
         else:
             # Daemon mode: listen for commands
             await listen_commands(pool, rds)

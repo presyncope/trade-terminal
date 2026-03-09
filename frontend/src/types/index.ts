@@ -17,8 +17,14 @@ export interface Kline {
   volume?: number;
 }
 
-/** Real-time kline update from WebSocket */
-export interface KlineUpdate extends Kline {
+/** Real-time kline update from WebSocket (DataStream format uses ts: ISO string) */
+export interface KlineUpdate {
+  ts: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number;
   closed: boolean;
 }
 

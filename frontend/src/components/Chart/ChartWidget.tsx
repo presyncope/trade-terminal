@@ -22,6 +22,8 @@ export function ChartWidget({ config }: Props) {
   const updateChart = useTerminalStore((s) => s.updateChart);
   const removeChart = useTerminalStore((s) => s.removeChart);
   const [showOrder, setShowOrder] = useState(false);
+  // Incrementing this key forces CandlestickChart to remount and reload data
+  const [resetKey, setResetKey] = useState(0);
 
   return (
     <div style={{
@@ -33,9 +35,8 @@ export function ChartWidget({ config }: Props) {
       borderRadius: 4,
       overflow: "hidden",
     }}>
-      {/* Header — draggable handle */}
+      {/* Header */}
       <div
-        className="chart-drag-handle"
         style={{
           height: 28,
           background: "#1e222d",
@@ -43,10 +44,18 @@ export function ChartWidget({ config }: Props) {
           alignItems: "center",
           padding: "0 6px",
           gap: 6,
-          cursor: "grab",
           fontSize: 12,
+          userSelect: "none",
         }}
       >
+        {/* Drag handle — only this grip area is draggable */}
+        <div
+          className="chart-drag-handle"
+          style={{ cursor: "grab", color: "#555", fontSize: 10, padding: "0 2px" }}
+        >
+          ⠿
+        </div>
+
         <SymbolSelector
           exchange={config.exchange}
           symbol={config.symbol}
@@ -54,7 +63,7 @@ export function ChartWidget({ config }: Props) {
           onChangeSymbol={(s) => updateChart(config.id, { symbol: s })}
         />
 
-        {/* Interval selector */}
+        {/* Interval selector — outside drag handle so clicks aren't swallowed */}
         {["1m", "5m", "15m", "1h", "4h", "1d"].map((iv) => (
           <button
             key={iv}
@@ -74,6 +83,23 @@ export function ChartWidget({ config }: Props) {
         ))}
 
         <div style={{ flex: 1 }} />
+
+        {/* Reset chart — reloads data, keeps timeframe */}
+        <button
+          onClick={() => setResetKey((k) => k + 1)}
+          title="Reset chart"
+          style={{
+            background: "transparent",
+            color: "#787b86",
+            border: "none",
+            cursor: "pointer",
+            fontSize: 13,
+            lineHeight: 1,
+            padding: "0 2px",
+          }}
+        >
+          ↺
+        </button>
 
         <button
           onClick={() => setShowOrder(!showOrder)}
@@ -109,6 +135,7 @@ export function ChartWidget({ config }: Props) {
       <div style={{ flex: 1, display: "flex" }}>
         <div style={{ flex: 1 }}>
           <CandlestickChart
+            key={`${config.exchange}:${config.symbol}:${config.interval}:${resetKey}`}
             exchange={config.exchange}
             symbol={config.symbol}
             interval={config.interval}

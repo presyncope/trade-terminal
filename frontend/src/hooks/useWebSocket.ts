@@ -22,6 +22,15 @@ export function onKlineUpdate(listener: KlineListener): () => void {
   return () => klineListeners.delete(listener);
 }
 
+// Backfill completion listeners
+type BackfillDoneListener = (exchange: string, symbol: string) => void;
+const backfillDoneListeners = new Set<BackfillDoneListener>();
+
+export function onBackfillDone(listener: BackfillDoneListener): () => void {
+  backfillDoneListeners.add(listener);
+  return () => backfillDoneListeners.delete(listener);
+}
+
 let ws: WebSocket | null = null;
 let subscribedChannels = new Set<string>();
 
@@ -76,6 +85,12 @@ export function useWebSocket() {
           klineListeners.forEach((fn) => fn(exchange, symbol, data));
         } else if (channel.startsWith("fill:")) {
           addFill(data as Fill);
+        } else if (channel.startsWith("backfill:done:")) {
+          // Parse channel: backfill:done:{exchange}:{symbol}
+          const parts = channel.split(":");
+          const exchange = parts[2];
+          const symbol = parts[3];
+          backfillDoneListeners.forEach((fn) => fn(exchange, symbol));
         }
       } catch {
         // ignore parse errors
