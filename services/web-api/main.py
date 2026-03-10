@@ -25,6 +25,7 @@ sys.path.insert(0, "/app")
 from services.shared.config import TimescaleConfig, RedisConfig, Channels
 from services.shared.db import create_pool
 from services.shared.redis_client import create_redis
+from services.web_api.binance_client import BinanceAccountClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 logger = logging.getLogger("web-api")
@@ -32,17 +33,21 @@ logger = logging.getLogger("web-api")
 # ─── App State ────────────────────────────────────────────
 db_pool: asyncpg.Pool | None = None
 redis_client: aioredis.Redis | None = None
+binance_account: BinanceAccountClient | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global db_pool, redis_client
+    global db_pool, redis_client, binance_account
     db_pool = await create_pool()
     redis_client = create_redis()
+    binance_account = BinanceAccountClient()
+    await binance_account.initialize()
     logger.info("Web API started — DB pool and Redis connected")
     yield
     await db_pool.close()
     await redis_client.close()
+    await binance_account.close()
     logger.info("Web API stopped")
 
 
@@ -165,15 +170,18 @@ async def get_klines(
             await _publish_backfill(bf_start, end)
             backfill_triggered = True
     else:
-        # Initial load: backfill if empty or newest candle is stale (> 1h old)
-        newest_age_h = None
+        # Initial load: backfill if empty or newest candle is stale.
+        # Threshold = 3 intervals (min 5 minutes) so short-interval charts
+        # trigger backfill aggressively instead of waiting up to 1 hour.
+        stale_threshold_secs = max(3 * interval_secs, 300)  # at least 5 min
+        newest_age_secs = None
         if rows:
             newest_ts = rows[-1]["ts"]
             if newest_ts.tzinfo is None:
                 newest_ts = newest_ts.replace(tzinfo=timezone.utc)
-            newest_age_h = (now - newest_ts).total_seconds() / 3600
+            newest_age_secs = (now - newest_ts).total_seconds()
 
-        if not rows or newest_age_h > 1.0:
+        if not rows or newest_age_secs > stale_threshold_secs:
             bf_end   = now
             # Cover enough history to fill the chart (limit candles worth)
             bf_start = now - timedelta(seconds=limit * interval_secs)
@@ -239,6 +247,25 @@ async def cancel_order(cancel: dict):
     """Cancel an open order via Trading Node."""
     await redis_client.publish(Channels.CMD_CANCEL, json.dumps(cancel))
     return {"status": "cancel_submitted"}
+
+
+@app.get("/api/open-orders")
+async def get_open_orders(
+    exchange: str = Query(...),
+    symbol: str | None = Query(None),
+):
+    """Return open orders from the exchange. Currently supports binance_spot."""
+    if exchange == "binance_spot":
+        return await binance_account.get_open_orders(symbol)
+    return []
+
+
+@app.get("/api/balance")
+async def get_balance(exchange: str = Query(...)):
+    """Return non-zero account balances. Currently supports binance_spot."""
+    if exchange == "binance_spot":
+        return await binance_account.get_account_balances()
+    return []
 
 
 @app.post("/api/backfill")
@@ -349,8 +376,18 @@ async def _redis_relay(ws: WebSocket):
                 continue
 
             channel = msg["channel"]
-            # Only send if this client is subscribed to this channel
-            if ws in manager.active and channel in manager.active[ws]:
+            # Fill events are always broadcast to all connected clients so
+            # the account panel receives them without explicit subscription.
+            # Kline / backfill events only go to subscribed clients.
+            if channel.startswith("fill:"):
+                try:
+                    await ws.send_json({
+                        "channel": channel,
+                        "data": json.loads(msg["data"]),
+                    })
+                except Exception:
+                    break
+            elif ws in manager.active and channel in manager.active[ws]:
                 try:
                     await ws.send_json({
                         "channel": channel,

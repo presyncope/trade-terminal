@@ -5,10 +5,12 @@
  * - Lazy-loads older data when user scrolls left (infinite history)
  * - Auto-triggers backfill via web-api if data is missing from DB
  * - Subscribes to real-time kline updates via WebSocket
+ * - Gap-fill: detects holes in the live feed and fetches missing candles
+ * - Volume histogram displayed in the bottom 25% of the chart
  * - Displays fill markers (triangles) on the chart
  */
 
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   createChart,
   type IChartApi,
@@ -21,7 +23,7 @@ import {
 import { fetchKlines } from "../../api/klines";
 import { onKlineUpdate, onBackfillDone, wsSubscribe, wsUnsubscribe } from "../../hooks/useWebSocket";
 import { useTerminalStore } from "../../stores/terminalStore";
-import type { ExchangeId, KlineUpdate, Fill } from "../../types";
+import type { ExchangeId, KlineUpdate, Fill, Kline } from "../../types";
 
 interface Props {
   exchange: ExchangeId;
@@ -29,24 +31,46 @@ interface Props {
   interval: string;
 }
 
-// How many bars from the left edge triggers loading older data
+// Bars from the left edge that trigger loading older data
 const LOAD_TRIGGER_BARS = 50;
 
+// Interval in seconds — used for gap detection in live feed
+const INTERVAL_SECS: Record<string, number> = {
+  "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400,
+};
+
+type VolumeBar = { time: Time; value: number; color: string };
+
+// Module-level helpers (no component deps)
+function toCandles(raw: Kline[]): CandlestickData[] {
+  return raw.map((k) => ({ time: k.time as Time, open: k.open, high: k.high, low: k.low, close: k.close }));
+}
+
+function toVolumes(raw: Kline[]): VolumeBar[] {
+  return raw.map((k) => ({
+    time:  k.time as Time,
+    value: k.volume ?? 0,
+    color: k.close >= k.open ? "rgba(38,166,154,0.4)" : "rgba(239,83,80,0.4)",
+  }));
+}
+
 export function CandlestickChart({ exchange, symbol, interval }: Props) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
-  const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const containerRef   = useRef<HTMLDivElement>(null);
+  const chartRef       = useRef<IChartApi | null>(null);
+  const seriesRef      = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const volSeriesRef   = useRef<ISeriesApi<"Histogram"> | null>(null);
   const fills = useTerminalStore((s) => s.fills);
 
   // Lazy loading state
-  const allDataRef = useRef<CandlestickData[]>([]);
-  const oldestTsRef = useRef<number | null>(null);
-  const loadingRef = useRef(false);
-  const loadOlderRef = useRef<(() => Promise<void>) | null>(null);
-  const initialLoadedRef = useRef(false);   // blocks range handler until first setData completes
+  const allDataRef    = useRef<CandlestickData[]>([]);
+  const allVolumeRef  = useRef<VolumeBar[]>([]);
+  const oldestTsRef   = useRef<number | null>(null);
+  const loadingRef    = useRef(false);
+  const loadOlderRef  = useRef<(() => Promise<void>) | null>(null);
+  const initialLoadedRef = useRef(false);
   const [isBackfilling, setIsBackfilling] = useState(false);
 
-  // ─── Create chart on mount ─────────────────────────
+  // ─── Create chart + volume series on mount ───────────
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -61,23 +85,40 @@ export function CandlestickChart({ exchange, symbol, interval }: Props) {
       },
       crosshair: { mode: 0 },
       timeScale: { timeVisible: true, secondsVisible: false },
-      width: containerRef.current.clientWidth,
+      width:  containerRef.current.clientWidth,
       height: containerRef.current.clientHeight,
     });
 
-    const series = chart.addCandlestickSeries({
-      upColor: "#26a69a",
-      downColor: "#ef5350",
-      borderUpColor: "#26a69a",
-      borderDownColor: "#ef5350",
-      wickUpColor: "#26a69a",
-      wickDownColor: "#ef5350",
+    // Candlestick price scale — leaves bottom 25% for volume
+    chart.priceScale("right").applyOptions({
+      scaleMargins: { top: 0.05, bottom: 0.25 },
     });
 
-    chartRef.current = chart;
-    seriesRef.current = series;
+    const series = chart.addCandlestickSeries({
+      upColor:         "#26a69a",
+      downColor:       "#ef5350",
+      borderUpColor:   "#26a69a",
+      borderDownColor: "#ef5350",
+      wickUpColor:     "#26a69a",
+      wickDownColor:   "#ef5350",
+    });
 
-    // Resize observer
+    // Volume histogram — occupies the bottom 25%
+    const volSeries = chart.addHistogramSeries({
+      priceFormat:      { type: "volume" },
+      priceScaleId:     "volume",
+      lastValueVisible: false,
+      priceLineVisible: false,
+    } as any);
+
+    chart.priceScale("volume").applyOptions({
+      scaleMargins: { top: 0.75, bottom: 0 },
+    });
+
+    chartRef.current    = chart;
+    seriesRef.current   = series;
+    volSeriesRef.current = volSeries;
+
     const ro = new ResizeObserver((entries) => {
       const { width, height } = entries[0].contentRect;
       chart.applyOptions({ width, height });
@@ -87,26 +128,28 @@ export function CandlestickChart({ exchange, symbol, interval }: Props) {
     return () => {
       ro.disconnect();
       chart.remove();
-      chartRef.current = null;
-      seriesRef.current = null;
+      chartRef.current    = null;
+      seriesRef.current   = null;
+      volSeriesRef.current = null;
     };
   }, []);
 
-  // ─── Historical load + lazy load on scroll ─────────
+  // ─── Historical load + lazy-load on scroll ───────────
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current) return;
 
-    // Reset on symbol/interval change
-    allDataRef.current = [];
-    oldestTsRef.current = null;
-    loadingRef.current = false;
+    allDataRef.current   = [];
+    allVolumeRef.current = [];
+    oldestTsRef.current  = null;
+    loadingRef.current   = false;
     initialLoadedRef.current = false;
     setIsBackfilling(false);
 
-    const toCandles = (raw: { time: number; open: number; high: number; low: number; close: number }[]): CandlestickData[] =>
-      raw.map((k) => ({ time: k.time as Time, open: k.open, high: k.high, low: k.low, close: k.close }));
+    const setAllData = (candles: CandlestickData[], volumes: VolumeBar[]) => {
+      seriesRef.current?.setData(candles);
+      volSeriesRef.current?.setData(volumes);
+    };
 
-    // Load data older than current oldest timestamp
     const loadOlderData = async () => {
       if (loadingRef.current || oldestTsRef.current === null) return;
       loadingRef.current = true;
@@ -118,19 +161,18 @@ export function CandlestickChart({ exchange, symbol, interval }: Props) {
         });
 
         if (data.length > 0) {
-          const newCandles = toCandles(data.filter((k) => k.time < oldestTsRef.current!));
-          if (newCandles.length > 0) {
-            // Preserve scroll position — setData resets the visible range
+          const filtered = data.filter((k) => k.time < oldestTsRef.current!);
+          if (filtered.length > 0) {
             const currentRange = chartRef.current?.timeScale().getVisibleLogicalRange();
-            const prependCount = newCandles.length;
-            allDataRef.current = [...newCandles, ...allDataRef.current];
-            seriesRef.current?.setData(allDataRef.current);
-            oldestTsRef.current = newCandles[0].time as number;
-            // Shift logical range by the number of prepended candles
+            const prependCount = filtered.length;
+            allDataRef.current   = [...toCandles(filtered), ...allDataRef.current];
+            allVolumeRef.current = [...toVolumes(filtered), ...allVolumeRef.current];
+            setAllData(allDataRef.current, allVolumeRef.current);
+            oldestTsRef.current = filtered[0].time as number;
             if (currentRange) {
               chartRef.current?.timeScale().setVisibleLogicalRange({
                 from: currentRange.from + prependCount,
-                to: currentRange.to + prependCount,
+                to:   currentRange.to   + prependCount,
               });
             }
           }
@@ -138,7 +180,6 @@ export function CandlestickChart({ exchange, symbol, interval }: Props) {
 
         if (backfill_triggered) {
           setIsBackfilling(true);
-          // keep loadingRef.current = true while waiting for backfill:done
         } else {
           loadingRef.current = false;
         }
@@ -148,28 +189,46 @@ export function CandlestickChart({ exchange, symbol, interval }: Props) {
       }
     };
 
-    // Expose so backfill:done handler can call it
     loadOlderRef.current = loadOlderData;
 
-    // Initial historical fetch — set initialLoadedRef AFTER setData so range
-    // handler doesn't fire during the brief transition before the chart settles.
+    // Initial historical fetch
     fetchKlines({ exchange, symbol, interval, limit: 1000 })
       .then(({ data, backfill_triggered }) => {
         const candles = toCandles(data);
-        allDataRef.current = candles;
-        seriesRef.current?.setData(candles);
-        if (candles.length > 0) {
-          oldestTsRef.current = candles[0].time as number;
-        }
+        const volumes = toVolumes(data);
+        allDataRef.current   = candles;
+        allVolumeRef.current = volumes;
+        setAllData(candles, volumes);
+        if (candles.length > 0) oldestTsRef.current = candles[0].time as number;
         setIsBackfilling(backfill_triggered);
-        // Allow lazy-load range handler to fire only after initial data is displayed
         initialLoadedRef.current = true;
+
+        // Forward gap check: if newest DB candle is behind "now", immediately
+        // fetch the missing range. This fills the gap between the last backfill
+        // and the current live feed without waiting for a WebSocket event.
+        if (candles.length > 0) {
+          const newestTs = candles[candles.length - 1].time as number;
+          const ivSecs   = INTERVAL_SECS[interval] ?? 60;
+          const nowTs    = Math.floor(Date.now() / 1000);
+          if (nowTs - newestTs > ivSecs) {
+            fetchKlines({
+              exchange, symbol, interval,
+              start: new Date((newestTs + ivSecs) * 1000).toISOString(),
+              limit: 500,
+            }).then(({ data: fwd }) => {
+              const newC = toCandles(fwd.filter(k => k.time > newestTs));
+              const newV = toVolumes(fwd.filter(k => k.time > newestTs));
+              if (newC.length > 0) {
+                allDataRef.current   = [...allDataRef.current,   ...newC];
+                allVolumeRef.current = [...allVolumeRef.current, ...newV];
+                setAllData(allDataRef.current, allVolumeRef.current);
+              }
+            }).catch(console.error);
+          }
+        }
       })
       .catch(console.error);
 
-    // Subscribe to logical range changes to detect left-edge scrolling.
-    // Guard: skip until initial load finishes to avoid premature trigger when
-    // setData briefly shows range.from = 0 before the chart right-aligns.
     const handleRangeChange = (range: { from: number; to: number } | null) => {
       if (!range || !initialLoadedRef.current || loadingRef.current || oldestTsRef.current === null) return;
       if (range.from < LOAD_TRIGGER_BARS) {
@@ -183,29 +242,53 @@ export function CandlestickChart({ exchange, symbol, interval }: Props) {
     };
   }, [exchange, symbol, interval]);
 
-  // ─── Backfill completion handler ───────────────────
+  // ─── Backfill completion handler ─────────────────────
   useEffect(() => {
     const backfillChannel = `backfill:done:${exchange}:${symbol}`;
     wsSubscribe([backfillChannel]);
 
+    // Helper: fetch candles newer than newestTs and append to chart
+    const fillForwardGap = (newestTs: number) => {
+      const ivSecs = INTERVAL_SECS[interval] ?? 60;
+      const nowTs  = Math.floor(Date.now() / 1000);
+      if (nowTs - newestTs <= ivSecs) return;
+      fetchKlines({
+        exchange, symbol, interval,
+        start: new Date((newestTs + ivSecs) * 1000).toISOString(),
+        limit: 500,
+      }).then(({ data: fwd }) => {
+        const newC = toCandles(fwd.filter(k => k.time > newestTs));
+        const newV = toVolumes(fwd.filter(k => k.time > newestTs));
+        if (newC.length > 0) {
+          allDataRef.current   = [...allDataRef.current,   ...newC];
+          allVolumeRef.current = [...allVolumeRef.current, ...newV];
+          seriesRef.current?.setData(allDataRef.current);
+          volSeriesRef.current?.setData(allVolumeRef.current);
+        }
+      }).catch(console.error);
+    };
+
     const unsub = onBackfillDone((ex, sym) => {
       if (ex !== exchange || sym !== symbol) return;
-
       setIsBackfilling(false);
       loadingRef.current = false;
 
       if (oldestTsRef.current !== null) {
-        // Fetch older data that was just backfilled
+        // Load older data (for scroll-left history)
         loadOlderRef.current?.();
+        // Also fill any forward gap between the current newest bar and now
+        const newest = allDataRef.current[allDataRef.current.length - 1];
+        if (newest) fillForwardGap(newest.time as number);
       } else {
-        // Initial load was empty — refetch from scratch
+        // No data at all — do a full reload
         fetchKlines({ exchange, symbol, interval, limit: 1000 })
           .then(({ data }) => {
-            const candles = data.map((k) => ({
-              time: k.time as Time, open: k.open, high: k.high, low: k.low, close: k.close,
-            }));
-            allDataRef.current = candles;
+            const candles = toCandles(data);
+            const volumes = toVolumes(data);
+            allDataRef.current   = candles;
+            allVolumeRef.current = volumes;
             seriesRef.current?.setData(candles);
+            volSeriesRef.current?.setData(volumes);
             if (candles.length > 0) oldestTsRef.current = candles[0].time as number;
           })
           .catch(console.error);
@@ -218,32 +301,75 @@ export function CandlestickChart({ exchange, symbol, interval }: Props) {
     };
   }, [exchange, symbol, interval]);
 
-  // ─── Real-time kline subscription ──────────────────
-  // Only apply live 1m updates when the chart is showing 1m interval.
-  // Higher intervals use DB aggregates; applying raw 1m ticks to them
-  // causes flickering and incorrect candle timestamps.
+  // ─── Real-time kline subscription ────────────────────
+  // Only for 1m: applying raw 1m ticks to higher-interval charts causes
+  // wrong timestamps and flickering. Higher intervals rely on DB data.
   useEffect(() => {
     if (interval !== "1m") return;
 
     const klineChannel = `kline:${exchange}:${symbol}`;
     wsSubscribe([klineChannel]);
 
+    const intervalSecs = INTERVAL_SECS[interval] ?? 60;
+
     const unsub = onKlineUpdate((ex, sym, data: KlineUpdate) => {
       if (ex !== exchange || sym !== symbol) return;
-      const candle = {
-        time: Math.floor(new Date(data.ts).getTime() / 1000) as Time,
-        open: data.open,
-        high: data.high,
-        low: data.low,
-        close: data.close,
+
+      const candleTime = Math.floor(new Date(data.ts).getTime() / 1000) as Time;
+      const candle: CandlestickData = {
+        time: candleTime, open: data.open, high: data.high, low: data.low, close: data.close,
       };
-      seriesRef.current?.update(candle);
-      // Keep allDataRef in sync with the latest candle
+      const volBar: VolumeBar = {
+        time:  candleTime,
+        value: data.volume ?? 0,
+        color: data.close >= data.open ? "rgba(38,166,154,0.4)" : "rgba(239,83,80,0.4)",
+      };
+
+      // Gap detection: if incoming candle is >1.5 intervals ahead of the last
+      // known bar, fetch the missing candles before applying the live update.
       const last = allDataRef.current[allDataRef.current.length - 1];
-      if (last && (last.time as number) === (candle.time as number)) {
+      const lastTime = last ? (last.time as number) : null;
+      const gapExists = lastTime !== null && (candleTime as number) - lastTime > intervalSecs * 1.5;
+
+      if (gapExists && !loadingRef.current) {
+        loadingRef.current = true;
+        const gapStartIso = new Date((lastTime! + intervalSecs) * 1000).toISOString();
+        const gapEndIso   = new Date((candleTime as number) * 1000).toISOString();
+
+        fetchKlines({ exchange, symbol, interval, start: gapStartIso, end: gapEndIso, limit: 500 })
+          .then(({ data: gapData }) => {
+            if (gapData.length > 0) {
+              const newCandles = gapData
+                .filter((k) => k.time > lastTime!)
+                .map((k) => ({ time: k.time as Time, open: k.open, high: k.high, low: k.low, close: k.close }));
+              const newVols = gapData
+                .filter((k) => k.time > lastTime!)
+                .map((k) => ({
+                  time:  k.time as Time,
+                  value: k.volume ?? 0,
+                  color: k.close >= k.open ? "rgba(38,166,154,0.4)" : "rgba(239,83,80,0.4)",
+                }));
+              allDataRef.current   = [...allDataRef.current, ...newCandles];
+              allVolumeRef.current = [...allVolumeRef.current, ...newVols];
+              seriesRef.current?.setData(allDataRef.current);
+              volSeriesRef.current?.setData(allVolumeRef.current);
+            }
+          })
+          .catch(console.error)
+          .finally(() => { loadingRef.current = false; });
+      }
+
+      // Apply live update to both series
+      seriesRef.current?.update(candle);
+      volSeriesRef.current?.update(volBar);
+
+      // Keep allDataRef in sync
+      if (last && (last.time as number) === (candleTime as number)) {
         allDataRef.current[allDataRef.current.length - 1] = candle;
-      } else if (!last || (last.time as number) < (candle.time as number)) {
+        allVolumeRef.current[allVolumeRef.current.length - 1] = volBar;
+      } else if (!last || (last.time as number) < (candleTime as number)) {
         allDataRef.current.push(candle);
+        allVolumeRef.current.push(volBar);
       }
     });
 
@@ -253,7 +379,7 @@ export function CandlestickChart({ exchange, symbol, interval }: Props) {
     };
   }, [exchange, symbol, interval]);
 
-  // ─── Fill markers ──────────────────────────────────
+  // ─── Fill markers ─────────────────────────────────────
   useEffect(() => {
     if (!seriesRef.current) return;
 
@@ -262,11 +388,11 @@ export function CandlestickChart({ exchange, symbol, interval }: Props) {
     );
 
     const markers: SeriesMarker<Time>[] = relevantFills.map((f) => ({
-      time: Math.floor(new Date(f.ts).getTime() / 1000) as Time,
+      time:     Math.floor(new Date(f.ts).getTime() / 1000) as Time,
       position: f.side === "BUY" ? "belowBar" : "aboveBar",
-      color: f.side === "BUY" ? "#26a69a" : "#ef5350",
-      shape: f.side === "BUY" ? "arrowUp" : "arrowDown",
-      text: `${f.side} ${f.quantity}`,
+      color:    f.side === "BUY" ? "#26a69a" : "#ef5350",
+      shape:    f.side === "BUY" ? "arrowUp"  : "arrowDown",
+      text:     `${f.side} ${f.quantity}`,
     }));
 
     seriesRef.current.setMarkers(
@@ -274,7 +400,7 @@ export function CandlestickChart({ exchange, symbol, interval }: Props) {
     );
   }, [fills, exchange, symbol]);
 
-  // ─── Subscribe to fills channel ────────────────────
+  // ─── Subscribe to fills channel ───────────────────────
   useEffect(() => {
     const fillChannel = `fill:${exchange}:${symbol}`;
     wsSubscribe([fillChannel]);

@@ -14,7 +14,7 @@ import GridLayout from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
 import { useTerminalStore } from "../../stores/terminalStore";
 import { ChartWidget } from "../Chart/ChartWidget";
-import { TradeHistory } from "../Trading/TradeHistory";
+import { AccountPanel } from "../Trading/AccountPanel";
 import type { LayoutItem } from "../../types";
 
 export function TerminalLayout() {
@@ -89,14 +89,14 @@ export function TerminalLayout() {
         </GridLayout>
       </div>
 
-      {/* Trade History (bottom panel) */}
+      {/* Account panel (bottom) — open orders, fills, balance */}
       <div style={{
-        height: 180,
+        height: 200,
         borderTop: "1px solid #2a2e39",
         background: "#1e222d",
-        overflow: "auto",
+        flexShrink: 0,
       }}>
-        <TradeHistory />
+        <AccountPanel />
       </div>
     </div>
   );

@@ -6,7 +6,7 @@ COPY services/shared/ services/shared/
 COPY services/web-api/ services/web_api/
 
 RUN pip install --no-cache-dir \
-    fastapi uvicorn[standard] asyncpg redis[hiredis]
+    fastapi uvicorn[standard] asyncpg redis[hiredis] aiohttp
 
 EXPOSE 8000
 

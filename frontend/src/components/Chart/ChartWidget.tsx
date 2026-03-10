@@ -132,8 +132,8 @@ export function ChartWidget({ config }: Props) {
       </div>
 
       {/* Chart area */}
-      <div style={{ flex: 1, display: "flex" }}>
-        <div style={{ flex: 1 }}>
+      <div style={{ flex: 1, display: "flex", minWidth: 0 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
           <CandlestickChart
             key={`${config.exchange}:${config.symbol}:${config.interval}:${resetKey}`}
             exchange={config.exchange}
@@ -144,7 +144,7 @@ export function ChartWidget({ config }: Props) {
 
         {/* Side order panel */}
         {showOrder && (
-          <div style={{ width: 200, borderLeft: "1px solid #2a2e39" }}>
+          <div style={{ width: 260, borderLeft: "1px solid #2a2e39", overflow: "hidden", display: "flex", flexDirection: "column" }}>
             <OrderPanel exchange={config.exchange} symbol={config.symbol} />
           </div>
         )}

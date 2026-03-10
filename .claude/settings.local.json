@@ -31,7 +31,16 @@
       "Bash(curl -s \"http://localhost:8000/api/klines?exchange=binance_spot&symbol=BTCUSDT&interval=1h&limit=5\")",
       "Bash(python3 -c \"import json,sys,datetime; d=json.load\\(sys.stdin\\); print\\(''rows:'', len\\(d[''data'']\\), ''backfill_triggered:'', d[''backfill_triggered'']\\); [print\\(datetime.datetime.fromtimestamp\\(r[''time'']\\).isoformat\\(\\), r[''open''], r[''close'']\\) for r in d[''data'']]\")",
       "Bash(docker compose -f /home/nuk/repos/trade-terminal/docker-compose.yml logs data-worker --tail=10)",
-      "Bash(python3 -c \"import json,sys,datetime; d=json.load\\(sys.stdin\\); print\\(''rows:'', len\\(d[''data'']\\)\\); [print\\(datetime.datetime.fromtimestamp\\(r[''time'']\\).isoformat\\(\\), r[''open''], ''→'', r[''close'']\\) for r in d[''data'']]\")"
+      "Bash(python3 -c \"import json,sys,datetime; d=json.load\\(sys.stdin\\); print\\(''rows:'', len\\(d[''data'']\\)\\); [print\\(datetime.datetime.fromtimestamp\\(r[''time'']\\).isoformat\\(\\), r[''open''], ''→'', r[''close'']\\) for r in d[''data'']]\")",
+      "Bash(docker compose -f /home/nuk/repos/trade-terminal/docker-compose.yml up --build data-worker -d)",
+      "Bash(curl -s \"http://localhost:8000/api/klines?exchange=binance_futures&symbol=BTCUSDT&interval=1m&limit=3\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(''rows:'', len\\(d[''data'']\\), ''backfill:'', d[''backfill_triggered'']\\)\")",
+      "Bash(docker compose -f /home/nuk/repos/trade-terminal/docker-compose.yml logs data-worker --tail=8)",
+      "WebFetch(domain:nautilustrader.io)",
+      "Bash(python3 -c \":*)",
+      "Bash(docker compose up --build web-api frontend -d)",
+      "Bash(docker compose up --build frontend -d)",
+      "Bash(docker compose up --build web-api -d)"
     ]
   }
 }

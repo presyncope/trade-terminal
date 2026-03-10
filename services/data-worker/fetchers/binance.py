@@ -76,7 +76,7 @@ class BinanceFetcher:
     ):
         if futures:
             base_url    = FUTURES_TESTNET_URL if testnet else FUTURES_URL
-            account_type = BinanceAccountType.USDT_FUTURE
+            account_type = BinanceAccountType.USDT_FUTURES
         else:
             base_url    = SPOT_TESTNET_URL if testnet else SPOT_URL
             account_type = BinanceAccountType.SPOT

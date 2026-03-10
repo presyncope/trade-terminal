@@ -37,18 +37,32 @@ export interface Fill {
   price: number;
   quantity: number;
   order_id?: string;
+  status?: string;
   is_manual: boolean;
 }
 
-/** Manual order request */
-export interface OrderRequest {
-  exchange: ExchangeId;
+/** Open order from exchange */
+export interface OpenOrder {
+  orderId: number;
   symbol: string;
   side: "BUY" | "SELL";
-  type: "MARKET" | "LIMIT";
-  quantity: number;
-  price?: number;
+  type: string;
+  price: string;
+  origQty: string;
+  executedQty: string;
+  status: string;
+  timeInForce: string;
+  time: number;
 }
+
+/** Account balance entry */
+export interface BalanceEntry {
+  asset: string;
+  free: string;
+  locked: string;
+}
+
+// OrderRequest is defined in api/klines.ts with full type support
 
 /** Chart widget configuration */
 export interface ChartConfig {
