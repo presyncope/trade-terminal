@@ -275,6 +275,70 @@ async def trigger_backfill(req: dict):
     return {"status": "backfill_triggered"}
 
 
+@app.get("/api/leaderboard")
+async def get_leaderboard(
+    strategy_id: str | None = Query(None),
+    exchange:    str | None = Query(None),
+    symbol:      str | None = Query(None),
+    limit:       int        = Query(50, ge=1, le=500),
+):
+    """Return backtest runs ranked by Sharpe ratio descending."""
+    query  = "SELECT * FROM backtest_runs WHERE 1=1"
+    params: list = []
+    idx = 1
+
+    if strategy_id:
+        query += f" AND strategy_id = ${idx}"; params.append(strategy_id); idx += 1
+    if exchange:
+        query += f" AND exchange = ${idx}";    params.append(exchange);    idx += 1
+    if symbol:
+        query += f" AND symbol = ${idx}";      params.append(symbol);      idx += 1
+
+    query += f" ORDER BY sharpe_ratio DESC LIMIT ${idx}"
+    params.append(limit)
+
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(query, *params)
+
+    return [
+        {
+            "id":            row["id"],
+            "created_at":    row["created_at"].isoformat(),
+            "strategy_id":   row["strategy_id"],
+            "exchange":      row["exchange"],
+            "symbol":        row["symbol"],
+            "interval":      row["interval"],
+            "params":        json.loads(row["params"]),
+            "total_return":  row["total_return"],
+            "sharpe_ratio":  row["sharpe_ratio"],
+            "max_drawdown":  row["max_drawdown"],
+            "win_rate":      row["win_rate"],
+            "total_trades":  row["total_trades"],
+            "profit_factor": row["profit_factor"],
+            "avg_trade_pnl": row["avg_trade_pnl"],
+            "mlflow_run_id": row["mlflow_run_id"],
+            "mode":          row["mode"],
+        }
+        for row in rows
+    ]
+
+
+@app.post("/api/experiment")
+async def trigger_experiment(req: dict):
+    """Trigger the experiment service via Redis.
+
+    Body: {strategy_id, exchange, symbol, start, end, interval?, mode, params?, max_evals?}
+    """
+    await redis_client.publish("cmd:experiment", json.dumps(req))
+    return {"status": "experiment_triggered"}
+
+
+@app.get("/api/experiments/strategies")
+async def list_strategies():
+    """Return available strategy IDs."""
+    return [{"id": "sma_crossover", "name": "SMA Crossover"}]
+
+
 @app.get("/api/exchanges")
 async def list_exchanges():
     """Return supported exchanges and their types."""
@@ -367,8 +431,8 @@ async def _redis_relay(ws: WebSocket):
     rds = create_redis()
     pubsub = rds.pubsub()
 
-    # Subscribe to all kline, fill, and backfill completion channels via pattern
-    await pubsub.psubscribe("kline:*", "fill:*", "backfill:done:*")
+    # Subscribe to all kline, fill, backfill completion, and experiment done channels
+    await pubsub.psubscribe("kline:*", "fill:*", "backfill:done:*", "experiment:done")
 
     try:
         async for msg in pubsub.listen():
@@ -376,10 +440,9 @@ async def _redis_relay(ws: WebSocket):
                 continue
 
             channel = msg["channel"]
-            # Fill events are always broadcast to all connected clients so
-            # the account panel receives them without explicit subscription.
+            # Fill and experiment:done events are broadcast to all connected clients.
             # Kline / backfill events only go to subscribed clients.
-            if channel.startswith("fill:"):
+            if channel.startswith("fill:") or channel == "experiment:done":
                 try:
                     await ws.send_json({
                         "channel": channel,

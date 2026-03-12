@@ -83,6 +83,53 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ─── Experiment Layer ────────────────────────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.13.0
+    container_name: irh-mlflow
+    ports:
+      - "5000:5000"
+    environment:
+      MLFLOW_BACKEND_STORE_URI: postgresql://trader:trader_pass@timescaledb:5432/trade_hub
+      MLFLOW_ARTIFACT_ROOT: /mlflow/artifacts
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        pip install --quiet psycopg2-binary &&
+        mlflow server
+          --backend-store-uri postgresql://trader:trader_pass@timescaledb:5432/trade_hub
+          --default-artifact-root /mlflow/artifacts
+          --host 0.0.0.0
+          --port 5000
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/')"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  experiment:
+    build:
+      context: .
+      dockerfile: services/experiment/Dockerfile
+    container_name: irh-experiment
+    env_file: .env
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    restart: unless-stopped
+
   # ─── Frontend ────────────────────────────────────────────
   frontend:
     build:
@@ -96,7 +143,9 @@ services:
     environment:
       - VITE_WS_URL=ws://localhost:8000/ws
       - VITE_API_URL=http://localhost:8000
+      - VITE_MLFLOW_URL=http://localhost:5000
 
 volumes:
   timescale_data:
   redis_data:
+  mlflow_artifacts:

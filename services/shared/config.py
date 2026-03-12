@@ -67,3 +67,5 @@ class Channels:
     FILL_ALL = "fill:*"
     CMD_ORDER = "cmd:order"
     CMD_CANCEL = "cmd:cancel"
+    CMD_EXPERIMENT = "cmd:experiment"
+    EXPERIMENT_DONE = "experiment:done"

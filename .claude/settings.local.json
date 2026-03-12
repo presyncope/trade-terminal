@@ -40,7 +40,8 @@
       "Bash(python3 -c \":*)",
       "Bash(docker compose up --build web-api frontend -d)",
       "Bash(docker compose up --build frontend -d)",
-      "Bash(docker compose up --build web-api -d)"
+      "Bash(docker compose up --build web-api -d)",
+      "Bash(find /home/nuk/repos/trade-terminal -name *.txt -o -name *.toml)"
     ]
   }
 }
